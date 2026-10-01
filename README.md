@@ -1,4 +1,4 @@
-# Programador automático de producción — Tejido de punto
+# Programador automático de producción — Confección y decoración
 
 Guía pensada para alguien que **no es programador**. Se lee en 10 minutos.
 
@@ -6,146 +6,162 @@ Guía pensada para alguien que **no es programador**. Se lee en 10 minutos.
 
 ## 1. La idea en una frase
 
-Hoy usted descarga datos de SAP B1 y arma el programa a mano en Excel.
-Este proyecto hace que **el computador arme el programa por usted**, siguiendo
-las mismas reglas que usted ya aplica, en segundos.
+Hoy usted descarga varias queries de SAP B1, las cruza con otros Excel y arma el
+programa a mano. Esta herramienta **hace el cruce y arma el programa por usted**,
+siguiendo reglas claras, en segundos.
 
 > **¿Esto es Inteligencia Artificial?** No exactamente, y está bien que no lo sea.
 > Es **automatización con reglas**: el computador sigue instrucciones claras
-> ("primero lo urgente", "usar la máquina que termine antes"). Es más confiable y
-> fácil de revisar que una IA. La IA (como Claude) sirve para **ayudarle a construir
-> y ajustar** esta herramienta conversando en español, sin que usted programe.
+> ("primero lo urgente", "no cortar si no hay tela"). Es confiable y usted puede
+> revisar cada decisión. La IA (como Claude) sirve para **ayudarle a construir y
+> ajustar** la herramienta conversando en español.
 
 ## 2. Una analogía: la receta de cocina
 
 | En la cocina | En su programa de producción |
 |---|---|
-| Ingredientes | Los datos: pedidos (de SAP), rutas, máquinas |
-| Receta (pasos) | Las reglas de programación |
-| Cocinero | El archivo `programador.py` |
-| Plato servido | El Excel `programa_produccion.xlsx` |
+| Ingredientes | Sus archivos: órdenes de venta, órdenes de corte, explosión de materiales |
+| Despensa fija | `configuracion.xlsx`: rutas, recursos, horarios |
+| Receta | Las reglas de programación |
+| Cocinero | `programador.py` (usted no necesita abrirlo) |
+| Plato servido | `programa_produccion.xlsx` |
 
-Usted solo cambia los **ingredientes** (pega los pedidos nuevos) y el cocinero
-prepara el plato. Si quiere otro sabor, se ajusta la **receta** (las reglas).
-
-## 3. Qué hace, paso a paso
+## 3. Cómo fluye la información
 
 ```
- SAP B1  ──►  datos_entrada.xlsx  ──►  programador.py  ──►  programa_produccion.xlsx
-(descarga)     (usted pega aquí)        (doble clic)          (resultado con colores)
+ SAP B1 (Query Manager)        Otros Excel
+   ├─ Órdenes de venta    ─┐
+   ├─ Órdenes de corte    ─┼──►  carpeta "entradas"  ──►  programador  ──►  programa_produccion.xlsx
+   └─ Explosión materiales ┘            ▲
+                                        │
+                          configuracion.xlsx (rutas, recursos, fuentes)
 ```
 
-Las reglas que sigue hoy (se pueden cambiar):
+El programa **une** los archivos usando los números de documento:
 
-1. **Ordena los pedidos**: primero por *Prioridad* (1 = urgente), luego por la
-   *fecha de entrega* más cercana.
-2. **Recorre los procesos** de cada artículo en orden
-   (ej.: Tejido → Tintorería → Acabado → Revisión). Un proceso no empieza hasta
-   que termina el anterior (más las horas de espera/reposo si las hay).
-3. **Escoge máquina**: entre las máquinas de ese proceso (y solo las permitidas
-   para ese artículo, ej. por diámetro o galga), usa la que **termine primero**.
-4. **Calcula tiempos**: `horas = alistamiento + kilos ÷ kg por hora`, respetando
-   el horario de cada máquina (horas por día, sábados, domingos).
-5. **Avisa**: marca cada pedido como **A TIEMPO** (verde), **EN RIESGO** (amarillo,
-   menos de 2 días de margen) o **ATRASADO** (rojo).
+- **Orden de corte → Orden de venta**: de ahí saca el *cliente* y la *fecha de entrega*.
+- **Orden de corte → Explosión de materiales**: revisa si hay tela e insumos.
+  Si falta material y se sabe cuándo llega, no programa el corte antes de esa fecha.
+  Si no hay fecha de llegada, marca la orden como **FALTA MATERIAL**.
 
-## 4. El archivo de entrada `datos_entrada.xlsx`
+## 4. Las reglas que sigue
 
-Tiene 4 hojas (más una de instrucciones). Viene con **datos de ejemplo** para que
-lo pruebe; luego los reemplaza por los reales.
+1. **Orden de atención**: primero *Prioridad* (1 = urgente), luego la *fecha de entrega* más cercana.
+2. **Ruta de cada referencia**: por ejemplo
+   - Camiseta sublimada: Diseño → Sublimado → Corte → Confección → Despacho
+   - Polo bordado: Diseño → Corte → Bordado → Confección → Despacho
+   - Buzo con transfer: Diseño → Corte → Confección → Transfer → Despacho
+   - Camiseta con pad print: Diseño → Corte → Pad print → Confección → Despacho
 
-| Hoja | ¿Cada cuánto se actualiza? | Qué contiene |
+   Un proceso no empieza hasta que termina el anterior (más horas de espera si las hay,
+   por ejemplo secado).
+3. **Tiempo de cada proceso** = alistamiento + horas fijas + (prendas ÷ prendas por hora).
+   - Diseño y Despacho suelen ser *horas fijas por orden* (ej. 3 h).
+   - Corte, Bordado, Confección, etc. dependen de la *cantidad*.
+4. **Recurso**: en cada proceso usa la máquina, módulo o persona que **termine primero**.
+   Si un recurso tiene un hueco libre (por ejemplo, porque otra orden espera tela),
+   lo aprovecha.
+5. **Horarios**: respeta las horas por día, sábados, domingos y fechas de mantenimiento.
+6. **Semáforo**: 🟢 A TIEMPO · 🟡 EN RIESGO (menos de 2 días de margen) · 🔴 ATRASADO ·
+   🟠 FALTA MATERIAL.
+
+## 5. Los archivos
+
+### `configuracion.xlsx` (se llena una vez y se ajusta de vez en cuando)
+
+| Hoja | Qué contiene |
+|---|---|
+| **Fuentes** | En qué archivo está cada dato y **cómo se llama la columna en SU archivo**. |
+| **Rutas** | Procesos de cada referencia, en orden (Paso 10, 20, 30…), con sus tiempos. |
+| **Recursos** | Diseñadores, mesas de corte, sublimadora, bordadoras, planchas de transfer, pad print, módulos de confección, despacho, con horarios. |
+| **Parametros** | Fecha y hora de inicio del programa. |
+
+**La hoja Fuentes es la clave para trabajar con SAP + otros Excel.** Ejemplo:
+
+| Dato | Campo_programa | Columna_en_su_archivo | Archivo |
+|---|---|---|---|
+| Ordenes_venta | Orden_venta | DocNum | ordenes_venta* |
+| Ordenes_venta | Cliente | CardName | ordenes_venta* |
+| Ordenes_venta | Fecha_entrega | DocDueDate | ordenes_venta* |
+
+Se lee así: *"en el archivo que empieza por `ordenes_venta`, la columna `DocNum` es el número de la orden de venta"*.
+Si mañana cambian una query en SAP, **solo se cambia esta tabla**; no hay que tocar nada más.
+
+Detalles que facilitan la vida:
+- El `*` en *Archivo* toma **el archivo más reciente** que empiece así, por ejemplo `ordenes_corte_2026-10-05.xlsx`.
+  No tiene que renombrar las descargas.
+- No importan las mayúsculas ni las tildes en los nombres de columnas.
+- Si SAP pone un título encima de la tabla, el programa encuentra solo la fila de encabezados.
+- Lee `.xlsx`, `.xls`, `.csv` y `.txt` (texto tabulado).
+- Acepta fechas `dd/mm/aaaa` y números como `1.200,50`.
+
+### Carpeta `entradas` (se actualiza cada vez que programa)
+
+Ahí deja lo que descarga del Query Manager y los otros Excel. Hoy trae **archivos de
+ejemplo** con nombres de columnas parecidos a los de SAP; reemplácelos por los suyos.
+
+| Dato | Obligatorio | Campos que necesita |
 |---|---|---|
-| **Pedidos** | Cada vez que programa | Lo que descarga de SAP: Pedido, Articulo, Descripcion, Cliente, Cantidad_kg, Fecha_entrega, Prioridad |
-| **Rutas** | Solo con artículos nuevos | Por artículo: Paso, Proceso, Kg_por_hora, Horas_alistamiento, Maquinas_permitidas (separadas por `;`), Horas_espera_despues |
-| **Maquinas** | Cuando cambia la planta | Maquina, Proceso, Horas_por_dia, Trabaja_sabado, Trabaja_domingo, Disponible_desde (para mantenimientos) |
-| **Parametros** | Cada vez que programa | Fecha_inicio_programa, Hora_inicio_turno |
-
-**Importante:** los nombres de las columnas deben quedar **exactamente** como están.
-El orden de las columnas no importa, y puede tener columnas extra.
-
-## 5. De dónde sacar los datos en SAP B1
-
-Lo más útil son las **órdenes de fabricación abiertas**. Si su área de sistemas
-puede crear una consulta (Herramientas → Consultas → Generador/Asistente de consultas),
-esta trae exactamente las columnas que necesita la hoja *Pedidos*:
-
-```sql
-SELECT  T0.DocNum                       AS "Pedido",
-        T0.ItemCode                     AS "Articulo",
-        T1.ItemName                     AS "Descripcion",
-        T0.CardCode                     AS "Cliente",
-        T0.PlannedQty - T0.CmpltQty     AS "Cantidad_kg",
-        T0.DueDate                      AS "Fecha_entrega",
-        3                               AS "Prioridad"
-FROM    OWOR T0
-JOIN    OITM T1 ON T1.ItemCode = T0.ItemCode
-WHERE   T0.Status IN ('P','R')          -- P = planificada, R = liberada
-ORDER BY T0.DueDate
-```
-
-Si programan desde **pedidos de venta** en vez de órdenes de fabricación, las tablas
-son `ORDR` (encabezado) y `RDR1` (líneas, con `OpenQty` como cantidad pendiente).
-Las tablas `OITT`/`ITT1` (listas de materiales) y, si las usan, las *rutas de producción*
-de SAP B1 pueden alimentar la hoja *Rutas*.
-
-Al exportar a Excel desde SAP, solo copie y pegue en la hoja *Pedidos*.
+| Órdenes de corte | Sí | N° orden de corte, N° orden de venta, referencia, cantidad (opcional: prioridad, descripción) |
+| Órdenes de venta | Sí | N° orden de venta, cliente, fecha de entrega |
+| Explosión de materiales | No | N° orden de corte, material, requerido, disponible (opcional: fecha de llegada) |
 
 ## 6. Instalación (una sola vez, en Windows)
 
 1. Instale **Python** desde <https://www.python.org/downloads/>.
-   En la primera pantalla **marque la casilla "Add Python to PATH"**.
+   En la primera pantalla **marque "Add Python to PATH"**.
 2. Descargue esta carpeta a su computador.
-3. Doble clic en **`instalar.bat`** (instala dos complementos: `pandas` y `openpyxl`).
+3. Doble clic en **`instalar.bat`**.
 
 ## 7. Uso diario
 
-1. Abra `datos_entrada.xlsx`, pegue los pedidos nuevos y actualice la fecha de inicio.
-   Guarde y **cierre** el archivo.
-2. Doble clic en **`ejecutar.bat`**.
-3. Abra **`programa_produccion.xlsx`**:
+1. Ejecute sus queries en SAP, exporte a Excel y guarde los archivos en la carpeta **`entradas`**.
+2. Si cambió la fecha de inicio, actualícela en `configuracion.xlsx` → *Parametros*.
+3. Doble clic en **`ejecutar.bat`**.
+4. Abra **`programa_produccion.xlsx`**:
 
 | Hoja | Para qué sirve |
 |---|---|
-| **Resumen_pedidos** | Semáforo por pedido: cuándo termina y si cumple la fecha |
-| **Programa_por_maquina** | La lista de trabajo de cada máquina, en orden (para entregar a planta) |
-| **Carga_maquinas** | Horas y kilos asignados a cada máquina → muestra el **cuello de botella** |
-| **Advertencias** | Artículos sin ruta, procesos sin máquina, etc. |
-| **Gantt** | Calendario visual: una fila por máquina, una columna por día |
+| **Resumen_ordenes** | Semáforo por orden de corte: cuándo termina y si cumple |
+| **Programa_por_recurso** | Lista de trabajo de cada máquina, módulo o persona (para entregar a planta) |
+| **Programa_por_orden** | Recorrido de cada orden por todos sus procesos |
+| **Carga_recursos** | Horas asignadas a cada recurso; muestra el **cuello de botella** |
+| **Materiales_faltantes** | Qué falta, para qué orden y cuándo llega (útil para compras) |
+| **Advertencias** | Referencias sin ruta, órdenes sin fecha, material sin fecha de llegada |
+| **Gantt** | Calendario visual: una fila por recurso, una columna por día |
 
-## 8. Cómo leer el resultado (con los datos de ejemplo)
+## 8. Cómo leer el resultado
 
-- Si un pedido sale en **rojo**, mire en *Programa_por_maquina* en qué proceso se
-  demora. Opciones: subirle la prioridad a 1, adelantar la fecha de inicio, agregar
-  horas extra (subir *Horas_por_dia*) o permitir más máquinas.
-- En *Carga_maquinas* la máquina con la fecha *Ocupada_hasta* más lejana es su
-  **cuello de botella**. En el ejemplo es **Revisión** (solo trabaja 8 h/día):
-  aunque tejido y tintorería terminen rápido, los pedidos se represan ahí.
-- Cambie un dato, vuelva a ejecutar y compare: así puede **simular escenarios**
-  ("¿qué pasa si la revisión trabaja 16 horas?") en segundos.
+- **Orden en rojo**: mire en *Programa_por_orden* en qué proceso se demora. Opciones:
+  subirle la prioridad a 1, agregar horas (subir *Horas_por_dia*), habilitar el sábado
+  o permitir más recursos.
+- **Cuello de botella**: en *Carga_recursos*, el recurso con más horas o con la fecha
+  *Ocupado_hasta* más lejana. En el ejemplo es **Confección** (los módulos).
+- **Simular escenarios**: cambie un dato, vuelva a ejecutar y compare.
+  Por ejemplo: *"¿y si el módulo 3 trabaja el sábado?"*.
 
 ## 9. Límites actuales (y cómo crecer)
 
-Esta es una **primera versión**. Hoy **no** tiene en cuenta:
+Esta versión **todavía no**:
 
-- Agrupar pedidos del mismo color en tintorería (lotes por color / capacidad del jet).
-- Disponibilidad de hilo o materia prima.
-- Dividir un pedido grande entre varias máquinas al mismo tiempo.
-- Tiempos de cambio que dependan del orden (ej. de color oscuro a claro).
+- Procesa en **paralelo** dos decoraciones de la misma orden (ej. bordado y sublimado
+  sobre piezas distintas al mismo tiempo); hoy van una después de la otra.
+- Divide una orden grande entre varios módulos de confección a la vez.
+- Agrupa órdenes con el mismo diseño o los mismos colores para ahorrar alistamientos.
+- Reparte el material escaso entre órdenes que compiten por la misma tela.
 
-Cada uno se puede agregar después. Camino recomendado:
+Camino recomendado:
 
-1. **Fase 1 (esta):** probarla con datos reales en paralelo al programa manual
-   durante 2–3 semanas y comparar.
-2. **Fase 2:** ajustar reglas (lotes por color, materia prima, turnos reales).
-3. **Fase 3:** que la descarga de SAP sea automática (consulta guardada o conexión
-   directa a la base de datos), para no copiar y pegar.
+1. **Fase 1 (esta):** conectar sus archivos reales (llenar la hoja *Fuentes*) y usarla
+   en paralelo al programa manual durante 2 a 3 semanas para comparar.
+2. **Fase 2:** ajustar reglas según lo que se observe (paralelos, división de órdenes, lotes).
+3. **Fase 3:** que las queries corran solas (conexión directa a SAP), sin descargar a mano.
 
 ## 10. Glosario rápido
 
-- **Python**: el "idioma" en que está escrita la receta. Usted no necesita aprenderlo.
-- **Script** (`programador.py`): el archivo con la receta.
-- **Ruta**: la secuencia de procesos que sigue un artículo.
-- **Cuello de botella**: el proceso más lento, que limita a toda la planta.
-- **Holgura**: días de margen entre la fecha en que termina un pedido y su entrega.
-- **Gantt**: gráfico de barras en el tiempo; cada barra es un trabajo en una máquina.
+- **Query**: consulta guardada en SAP que trae una tabla de datos.
+- **Ruta**: secuencia de procesos que sigue una referencia.
+- **Recurso**: quien hace el trabajo: una máquina, un módulo de confección o una persona.
+- **Cuello de botella**: el proceso más cargado, que limita a toda la planta.
+- **Holgura**: días de margen entre el fin estimado y la fecha de entrega.
+- **Gantt**: calendario de barras; cada barra es un trabajo en un recurso.
