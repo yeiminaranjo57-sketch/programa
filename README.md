@@ -165,3 +165,29 @@ Camino recomendado:
 - **Cuello de botella**: el proceso más cargado, que limita a toda la planta.
 - **Holgura**: días de margen entre el fin estimado y la fecha de entrega.
 - **Gantt**: calendario de barras; cada barra es un trabajo en un recurso.
+
+---
+
+## 11. Gantt de OC por taller (`gantt_oc.py`)
+
+Programa las OC de la hoja **LISTA OC** (sumando todos los talles de cada OC) en su taller,
+usando la hoja **CAPACIDAD** del mismo archivo.
+
+- **Entrada:** `entradas/PRUEBA_GANTT.xlsx` (hojas `LISTA OC` y `CAPACIDAD`).
+- **Capacidad diaria** = OPERADORES × 495 min ÷ TIEMPO, buscada por MODELO + COLOR.
+- **Orden:** el de la hoja LISTA OC; una OC detrás de otra en cada taller. Si una OC
+  termina a mitad de día, la siguiente empieza ese mismo día.
+- **Calendario:** desde el 09/10/2026, solo días hábiles: sin sábados, domingos ni
+  feriados nacionales de Argentina. Para usar otros feriados, agregue al archivo de
+  entrada una hoja `FERIADOS` con la columna `FECHA` (y opcional `DESCRIPCION`).
+- **Uso:** doble clic en `ejecutar_gantt.bat`, o `python gantt_oc.py [archivo] [AAAA-MM-DD]`.
+- **Salida:** `resultados/Programa_Gantt_OC.xlsx`
+
+| Hoja | Para qué sirve |
+|---|---|
+| **GANTT_TALLER** | Gantt agrupado por taller: una fila por OC, una columna por día hábil, unidades por día. Rojo = después de la FECHA FIN |
+| **GANTT_COMPACTO** | Una fila por taller con la OC que se trabaja cada día |
+| **PROGRAMA_OC** | Inicio y fin programados de cada OC, estado y días de atraso |
+| **DETALLE_DIARIO** | Fecha / taller / OC / unidades (para tablas dinámicas) |
+| **RESUMEN_TALLER** | Unidades, días de carga y fecha de fin por taller |
+| **FERIADOS** | Feriados que se descontaron |
