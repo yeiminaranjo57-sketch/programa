@@ -9,14 +9,20 @@ Qué hace este archivo (en palabras sencillas):
   2. Suma la CANTIDAD PLANIFICADA de cada OC (todos los talles juntos).
   3. Calcula la capacidad diaria = OPERADORES x 495 minutos / TIEMPO
      (la misma fórmula de la hoja CAPACIDAD).
-  4. En cada TALLER pone las OC una detrás de otra, en el orden de la hoja
-     LISTA OC, desde la fecha de inicio. Si una OC termina a mitad de día,
-     la siguiente usa el resto de ese día.
-  5. Solo cuenta días hábiles: sin sábados, domingos ni feriados.
+  4. Cada TALLER tiene una o varias LÍNEAS de producción (hoja "TALLERES"
+     del archivo de entrada, o la tabla TALLERES_POR_DEFECTO de abajo).
+     La capacidad de la hoja CAPACIDAD es la de UNA línea. Cada OC puede
+     ir como máximo en N líneas a la vez (CASEROS: 7 líneas, máx. 2 por OC).
+  5. Las OC se toman en el orden de la hoja LISTA OC. A cada una se le dan
+     las líneas que se liberan primero y la cantidad se reparte para que
+     terminen a la vez. Solo se usa una segunda línea si la OC necesita más
+     de un día de una línea. Si una OC termina a mitad de día, la siguiente
+     usa el resto de ese día en esa línea.
+  6. Solo cuenta días hábiles: sin sábados, domingos ni feriados.
      Los feriados se toman de la hoja "FERIADOS" del archivo de entrada si
      existe (columna FECHA); si no, se usa la lista de abajo (Argentina).
-  6. Guarda "resultados/Programa_Gantt_OC.xlsx" con el Gantt por taller,
-     el programa por OC, el detalle diario y el resumen por taller.
+  7. Guarda "resultados/Programa_Gantt_OC.xlsx" con el Gantt por línea y
+     por OC, el programa por OC, el detalle diario y la carga por línea.
 
 Cómo se usa:
   python gantt_oc.py                       (usa el archivo y fecha por defecto)
@@ -63,8 +69,17 @@ FERIADOS_POR_DEFECTO = {
     "2027-12-25": "Navidad",
 }
 
+# Líneas de cada taller: (cantidad de líneas, máximo de líneas por OC).
+# Se puede reemplazar con una hoja TALLERES en el archivo de entrada con las
+# columnas TALLER, LINEAS y MAX_LINEAS_POR_OC. Un taller que no esté aquí
+# trabaja con 1 línea.
+TALLERES_POR_DEFECTO = {
+    "CASEROS": (7, 2),
+    "OLIDEN": (1, 1),
+}
+
 # Colores de las barras (uno por taller) y de alerta
-COLORES_TALLER = ["4F81BD", "9BBB59", "F79646", "8064A2", "4BACC6", "C0504D", "2C4D75", "77933C"]
+COLORES_OC = ["4F81BD", "9BBB59", "F79646", "8064A2", "4BACC6", "2C4D75", "77933C", "B65708", "604A7B", "31859C"]
 COLOR_ATRASO = "FF0000"
 COLOR_ENCABEZADO = "1F3864"
 COLOR_TALLER_FILA = "D9E1F2"
@@ -109,6 +124,20 @@ def leer_feriados(archivo):
         return feriados, "hoja FERIADOS del archivo de entrada"
     except ValueError:
         return {date.fromisoformat(k): v for k, v in FERIADOS_POR_DEFECTO.items()}, "lista de Argentina incluida en el programa"
+
+
+def leer_talleres(archivo):
+    try:
+        hoja = pd.read_excel(archivo, sheet_name="TALLERES")
+    except ValueError:
+        return dict(TALLERES_POR_DEFECTO), "tabla incluida en el programa"
+    hoja.columns = [texto(c).upper() for c in hoja.columns]
+    talleres = {}
+    for _, fila in hoja.iterrows():
+        if texto(fila["TALLER"]):
+            lineas = int(fila["LINEAS"])
+            talleres[texto(fila["TALLER"])] = (lineas, min(lineas, int(fila.get("MAX_LINEAS_POR_OC", lineas))))
+    return talleres, "hoja TALLERES del archivo de entrada"
 
 
 def leer_ocs(archivo, cap, advertencias):
@@ -164,31 +193,66 @@ def dias_habiles(desde, feriados):
         d += timedelta(days=1)
 
 
-def programar(ocs, fecha_inicio, feriados):
-    """Pone las OC en fila dentro de cada taller. El tiempo se mide en
-    'días hábiles' con decimales: 2,5 = mitad del tercer día hábil."""
-    puntero = {}
+def repartir_por_dia(inicio, cantidad, cap_dia):
+    """Unidades por día de un tramo que empieza en 'inicio' (días hábiles con
+    decimales: 2,5 = mitad del tercer día). Redondeo acumulado para que la
+    suma sea exactamente la cantidad."""
+    fin = inicio + cantidad / cap_dia
+    por_dia, hecho, k = {}, 0, int(math.floor(inicio))
+    while k < fin - 1e-9:
+        hasta = min(fin, k + 1)
+        acumulado = round((hasta - inicio) * cap_dia) if hasta < fin else cantidad
+        if acumulado - hecho > 0:
+            por_dia[k] = acumulado - hecho
+        hecho = acumulado
+        k += 1
+    return fin, por_dia
+
+
+def nombre_linea(i):
+    return f"L{i + 1}"
+
+
+def programar(ocs, fecha_inicio, feriados, talleres):
+    """Asigna cada OC (en orden) a las líneas que se liberan primero, hasta el
+    máximo permitido, repartiendo la cantidad para que terminen a la vez."""
+    libre = {}  # taller -> [momento en que se libera cada línea]
     for oc in ocs:
-        inicio = puntero.get(oc["TALLER"], 0.0)
-        duracion = oc["CANTIDAD"] / oc["CAP_DIA"]
-        fin = inicio + duracion
-        puntero[oc["TALLER"]] = fin
-        oc["T_INICIO"], oc["T_FIN"], oc["DIAS"] = inicio, fin, duracion
+        n_lineas, max_por_oc = talleres.get(oc["TALLER"], (1, 1))
+        libres = libre.setdefault(oc["TALLER"], [0.0] * n_lineas)
+        orden = sorted(range(n_lineas), key=lambda i: (libres[i], i))
+        q, r = oc["CANTIDAD"], oc["CAP_DIA"]
 
-        # Reparte las unidades por día; redondeo acumulado para que la suma
-        # sea exactamente la cantidad de la OC.
-        oc["POR_DIA"] = {}
-        hecho = 0
-        k = int(math.floor(inicio))
-        while k < fin - 1e-9:
-            hasta = min(fin, k + 1)
-            acumulado = round((hasta - inicio) * oc["CAP_DIA"]) if hasta < fin else oc["CANTIDAD"]
-            if acumulado - hecho > 0:
-                oc["POR_DIA"][k] = acumulado - hecho
-            hecho = acumulado
-            k += 1
+        elegidas, fin = orden[:1], libres[orden[0]] + q / r
+        if q > r:  # una OC de menos de un día de una línea no se divide
+            for k in range(2, max_por_oc + 1):
+                cand = orden[:k]
+                fin_k = (sum(libres[i] for i in cand) + q / r) / k
+                if fin_k <= libres[cand[-1]] + 1e-9:
+                    break  # la línea extra se libera después: no ayuda
+                elegidas, fin = cand, fin_k
 
-    total_dias = int(math.ceil(max(puntero.values()))) if puntero else 0
+        # Unidades enteras por línea; la última línea se lleva el resto
+        cantidades, resto = [], q
+        for j, i in enumerate(elegidas):
+            u = resto if j == len(elegidas) - 1 else min(resto, int(round(r * (fin - libres[i]))))
+            cantidades.append(u)
+            resto -= u
+
+        oc["TRAMOS"], oc["POR_DIA"] = [], {}
+        for i, u in zip(elegidas, cantidades):
+            if u <= 0:
+                continue
+            inicio = libres[i]
+            fin_tramo, por_dia = repartir_por_dia(inicio, u, r)
+            libres[i] = fin_tramo
+            oc["TRAMOS"].append({"LINEA": i, "INICIO": inicio, "FIN": fin_tramo, "UNIDADES": u, "POR_DIA": por_dia})
+            for k, v in por_dia.items():
+                oc["POR_DIA"][k] = oc["POR_DIA"].get(k, 0) + v
+        oc["LINEAS"] = "+".join(nombre_linea(t["LINEA"]) for t in sorted(oc["TRAMOS"], key=lambda t: t["LINEA"]))
+        oc["DIAS"] = max(t["FIN"] for t in oc["TRAMOS"]) - min(t["INICIO"] for t in oc["TRAMOS"])
+
+    total_dias = int(math.ceil(max(max(v) for v in libre.values()))) if libre else 0
     gen = dias_habiles(fecha_inicio, feriados)
     calendario = [next(gen) for _ in range(total_dias)]
 
@@ -208,6 +272,13 @@ def programar(ocs, fecha_inicio, feriados):
 
 
 # ---------------------------------------------------------------- salida
+
+FINO = Side(style="thin", color="BFBFBF")
+BORDE = Border(left=FINO, right=FINO, top=FINO, bottom=FINO)
+MESES = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
+DIAS_SEM = ["LU", "MA", "MI", "JU", "VI"]
+FMT_FECHA = "dd/mm/yyyy"
+
 
 def estilo_encabezado(celda):
     celda.font = Font(bold=True, color="FFFFFF")
@@ -229,202 +300,216 @@ def tabla(ws, columnas, filas, anchos=None, formatos=None):
     ws.auto_filter.ref = ws.dimensions
 
 
-def hoja_gantt(wb, ocs, calendario, feriados, talleres):
-    ws = wb.active
-    ws.title = "GANTT_TALLER"
-    fijas = ["TALLER", "OC", "MODELO", "COLOR", "CANTIDAD", "CAP/DÍA", "INICIO", "FIN", "FECHA FIN OC", "ESTADO"]
+def encabezado_calendario(ws, fijas, calendario):
+    """Filas 1-3: columnas fijas + mes / día de la semana / fecha."""
     c0 = len(fijas) + 1
-    fino = Side(style="thin", color="BFBFBF")
-    borde = Border(left=fino, right=fino, top=fino, bottom=fino)
-    meses = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"]
-    dias_sem = ["LU", "MA", "MI", "JU", "VI"]
-
-    # Fila 1: mes / Fila 2: día de la semana / Fila 3: fecha
     for j, nombre in enumerate(fijas, 1):
         ws.merge_cells(start_row=1, start_column=j, end_row=3, end_column=j)
         estilo_encabezado(ws.cell(row=1, column=j, value=nombre))
     inicio_mes = c0
     for k, d in enumerate(calendario):
         col = c0 + k
-        estilo_encabezado(ws.cell(row=2, column=col, value=dias_sem[d.weekday()]))
+        estilo_encabezado(ws.cell(row=2, column=col, value=DIAS_SEM[d.weekday()]))
         c = ws.cell(row=3, column=col, value=d)
         estilo_encabezado(c)
         c.number_format = "dd/mm"
         c.alignment = Alignment(horizontal="center", text_rotation=90)
-        ultimo = k == len(calendario) - 1 or calendario[k + 1].month != d.month
-        if ultimo:
+        if k == len(calendario) - 1 or calendario[k + 1].month != d.month:
             if col > inicio_mes:
                 ws.merge_cells(start_row=1, start_column=inicio_mes, end_row=1, end_column=col)
-            estilo_encabezado(ws.cell(row=1, column=inicio_mes, value=f"{meses[d.month - 1]} {d.year}"))
+            estilo_encabezado(ws.cell(row=1, column=inicio_mes, value=f"{MESES[d.month - 1]} {d.year}"))
             inicio_mes = col + 1
+        ws.column_dimensions[get_column_letter(col)].width = 4.2
     ws.row_dimensions[3].height = 42
+    ws.freeze_panes = ws.cell(row=4, column=c0)
+    return c0
 
+
+def celda_barra(c, valor, color):
+    c.value = valor
+    c.fill = PatternFill("solid", fgColor=color)
+    c.font = Font(color="FFFFFF", size=8, bold=True)
+    c.alignment = Alignment(horizontal="center", vertical="center", text_rotation=90, wrap_text=True)
+
+
+def fila_taller(ws, fila, c0, calendario, taller, del_taller, n_lineas, totales):
+    valores = {1: taller, 2: f"{n_lineas} línea(s)", 3: f"{len(del_taller)} OC",
+               4: sum(o["CANTIDAD"] for o in del_taller)}
+    for col in range(1, c0 + len(calendario)):
+        c = ws.cell(row=fila, column=col, value=valores.get(col))
+        c.font = Font(bold=True, size=8 if col >= c0 else 11)
+        c.fill = PatternFill("solid", fgColor=COLOR_TALLER_FILA)
+        c.border = BORDE
+        if col >= c0 and (col - c0) in totales:
+            c.value = totales[col - c0]
+            c.alignment = Alignment(horizontal="center", text_rotation=90)
+
+
+def hoja_gantt_lineas(wb, ocs, calendario, talleres_orden, talleres):
+    """Gantt por TALLER: una fila por línea con la OC que trabaja cada día,
+    y debajo las unidades de ese día."""
+    ws = wb.active
+    ws.title = "GANTT_LINEAS"
+    c0 = encabezado_calendario(ws, ["TALLER", "LÍNEA", "OC", "UNIDADES"], calendario)
     fila = 4
-    for t_idx, taller in enumerate(talleres):
-        color = COLORES_TALLER[t_idx % len(COLORES_TALLER)]
+    for taller in talleres_orden:
         del_taller = [o for o in ocs if o["TALLER"] == taller]
-
-        # Fila resumen del taller: unidades totales por día
-        ws.cell(row=fila, column=1, value=taller)
-        ws.cell(row=fila, column=2, value=f"{len(del_taller)} OC")
-        ws.cell(row=fila, column=5, value=sum(o["CANTIDAD"] for o in del_taller))
-        ws.cell(row=fila, column=7, value=min(o["INICIO PROG"] for o in del_taller))
-        ws.cell(row=fila, column=8, value=max(o["FIN PROG"] for o in del_taller))
-        atrasadas = sum(1 for o in del_taller if o["ESTADO"] == "ATRASADA")
-        ws.cell(row=fila, column=10, value=f"{atrasadas} atrasadas" if atrasadas else "OK")
+        n_lineas = talleres.get(taller, (1, 1))[0]
         totales = {}
         for o in del_taller:
             for k, u in o["POR_DIA"].items():
                 totales[k] = totales.get(k, 0) + u
-        for k in range(len(calendario)):
-            if k in totales:
-                ws.cell(row=fila, column=c0 + k, value=totales[k])
-        for col in range(1, c0 + len(calendario)):
-            c = ws.cell(row=fila, column=col)
-            c.font = Font(bold=True)
-            c.fill = PatternFill("solid", fgColor=COLOR_TALLER_FILA)
-            c.border = borde
-            if col in (7, 8):
-                c.number_format = "dd/mm/yyyy"
-            if col >= c0:
-                c.alignment = Alignment(horizontal="center", text_rotation=90)
-                c.font = Font(bold=True, size=8)
+        fila_taller(ws, fila, c0, calendario, taller, del_taller, n_lineas, totales)
         fila += 1
+        for i in range(n_lineas):
+            tramos = [(n, o, t) for n, o in enumerate(del_taller) for t in o["TRAMOS"] if t["LINEA"] == i]
+            dia = {}
+            for n, o, t in tramos:
+                for k, u in t["POR_DIA"].items():
+                    dia.setdefault(k, []).append((n, o, u))
+            ws.cell(row=fila, column=1, value=taller)
+            ws.cell(row=fila, column=2, value=nombre_linea(i)).font = Font(bold=True)
+            ws.cell(row=fila, column=3, value=len(tramos))
+            ws.cell(row=fila, column=4, value=sum(t["UNIDADES"] for _, _, t in tramos))
+            ws.cell(row=fila + 1, column=2, value="unidades").font = Font(italic=True, size=8)
+            for k, lista in dia.items():
+                n, o, _ = lista[-1]
+                tarde = any(x[1]["FECHA FIN OC"] and calendario[k] > x[1]["FECHA FIN OC"] for x in lista)
+                color = COLOR_ATRASO if tarde else COLORES_OC[n % len(COLORES_OC)]
+                celda_barra(ws.cell(row=fila, column=c0 + k), " / ".join(str(x[1]["OC"]) for x in lista), color)
+                u = ws.cell(row=fila + 1, column=c0 + k, value=sum(x[2] for x in lista))
+                u.font = Font(size=7)
+                u.alignment = Alignment(horizontal="center", text_rotation=90)
+            for col in range(1, c0 + len(calendario)):
+                ws.cell(row=fila, column=col).border = BORDE
+                if col < c0:
+                    ws.cell(row=fila, column=col).alignment = Alignment(vertical="center")
+            ws.row_dimensions[fila].height = 70
+            fila += 2
+        fila += 1
+    for j, a in enumerate([11, 9, 6, 10], 1):
+        ws.column_dimensions[get_column_letter(j)].width = a
+    notas = ["Cada celda de una línea muestra la OC que trabaja ese día (dos OC si una termina y otra empieza).",
+             "El mismo color = la misma OC (aunque esté en dos líneas). ROJO = días después de la FECHA FIN de la OC.",
+             "Fila azul clara = total del taller por día. Solo días hábiles (sin sábados, domingos ni feriados)."]
+    for j, n in enumerate(notas):
+        ws.cell(row=fila + 1 + j, column=1, value=n)
 
-        # Una fila por OC con su barra
+
+def hoja_gantt_oc(wb, ocs, calendario, talleres_orden, talleres):
+    """Gantt por TALLER con una fila por OC y las unidades de cada día."""
+    ws = wb.create_sheet("GANTT_OC")
+    fijas = ["TALLER", "OC", "LÍNEAS", "MODELO", "COLOR", "CANTIDAD", "CAP/DÍA LÍNEA",
+             "INICIO", "FIN", "FECHA FIN OC", "ESTADO"]
+    c0 = encabezado_calendario(ws, fijas, calendario)
+    fila = 4
+    for taller in talleres_orden:
+        del_taller = [o for o in ocs if o["TALLER"] == taller]
+        totales = {}
         for o in del_taller:
-            valores = [taller, o["OC"], o["MODELO"], o["COLOR"], o["CANTIDAD"], round(o["CAP_DIA"], 1),
+            for k, u in o["POR_DIA"].items():
+                totales[k] = totales.get(k, 0) + u
+        fila_taller(ws, fila, c0, calendario, taller, del_taller, talleres.get(taller, (1, 1))[0], totales)
+        ws.cell(row=fila, column=4, value=None)
+        ws.cell(row=fila, column=6, value=sum(o["CANTIDAD"] for o in del_taller))
+        fila += 1
+        for n, o in enumerate(del_taller):
+            valores = [taller, o["OC"], o["LINEAS"], o["MODELO"], o["COLOR"], o["CANTIDAD"], round(o["CAP_DIA"], 1),
                        o["INICIO PROG"], o["FIN PROG"], o["FECHA FIN OC"], o["ESTADO"]]
             for j, v in enumerate(valores, 1):
                 c = ws.cell(row=fila, column=j, value=v)
-                c.border = borde
-                if j in (7, 8, 9):
-                    c.number_format = "dd/mm/yyyy"
-            estado = ws.cell(row=fila, column=10)
-            estado.font = Font(bold=True, color="C00000" if o["ESTADO"] == "ATRASADA" else "00703C")
+                c.border = BORDE
+                if j in (8, 9, 10):
+                    c.number_format = FMT_FECHA
+            ws.cell(row=fila, column=11).font = Font(bold=True, color="C00000" if o["ESTADO"] == "ATRASADA" else "00703C")
             for k in range(len(calendario)):
                 c = ws.cell(row=fila, column=c0 + k)
-                c.border = borde
+                c.border = BORDE
                 if k in o["POR_DIA"]:
                     tarde = o["FECHA FIN OC"] and calendario[k] > o["FECHA FIN OC"]
-                    c.value = o["POR_DIA"][k]
-                    c.fill = PatternFill("solid", fgColor=COLOR_ATRASO if tarde else color)
-                    c.font = Font(color="FFFFFF", size=8, bold=True)
-                    c.alignment = Alignment(horizontal="center", vertical="center", text_rotation=90)
+                    celda_barra(c, o["POR_DIA"][k], COLOR_ATRASO if tarde else COLORES_OC[n % len(COLORES_OC)])
             fila += 1
-        fila += 1  # línea en blanco entre talleres
-
-    anchos = [11, 7, 24, 9, 9, 8, 11, 11, 11, 11]
-    for j, a in enumerate(anchos, 1):
+        fila += 1
+    for j, a in enumerate([11, 7, 8, 24, 9, 9, 8, 11, 11, 11, 11], 1):
         ws.column_dimensions[get_column_letter(j)].width = a
-    for k in range(len(calendario)):
-        ws.column_dimensions[get_column_letter(c0 + k)].width = 4.2
-    ws.freeze_panes = ws.cell(row=4, column=c0)
-
-    leyenda = fila + 1
-    ws.cell(row=leyenda, column=1, value="Leyenda").font = Font(bold=True)
-    ws.cell(row=leyenda + 1, column=1, value="Número en cada celda = unidades programadas ese día.")
-    ws.cell(row=leyenda + 2, column=1, value="Barra en ROJO = días producidos después de la FECHA FIN de la OC.")
-    ws.cell(row=leyenda + 3, column=1, value="Solo se muestran días hábiles: sin sábados, domingos ni feriados (ver hoja FERIADOS).")
-    ws.cell(row=leyenda + 4, column=1, value="Fila azul clara = total del taller por día (debe coincidir con su capacidad diaria).")
+    ws.cell(row=fila + 1, column=1, value="Número en cada celda = unidades de la OC ese día (sumando sus líneas). "
+                                          "ROJO = después de la FECHA FIN de la OC.")
 
 
-def hoja_gantt_compacto(wb, ocs, calendario, talleres):
-    """Una sola fila por taller: cada día muestra la(s) OC que se trabajan."""
-    ws = wb.create_sheet("GANTT_COMPACTO", 1)
-    fino = Side(style="thin", color="BFBFBF")
-    borde = Border(left=fino, right=fino, top=fino, bottom=fino)
-    estilo_encabezado(ws.cell(row=1, column=1, value="TALLER"))
-    for k, d in enumerate(calendario):
-        c = ws.cell(row=1, column=2 + k, value=d)
-        estilo_encabezado(c)
-        c.number_format = "dd/mm"
-        c.alignment = Alignment(horizontal="center", text_rotation=90)
-    ws.row_dimensions[1].height = 42
-    for t_idx, taller in enumerate(talleres):
-        fila_oc, fila_u = 2 + t_idx * 3, 3 + t_idx * 3
-        ws.cell(row=fila_oc, column=1, value=taller).font = Font(bold=True)
-        ws.cell(row=fila_u, column=1, value="unidades").font = Font(italic=True, size=8)
-        base = COLORES_TALLER[t_idx % len(COLORES_TALLER)]
-        del_taller = [o for o in ocs if o["TALLER"] == taller]
-        por_dia = {}
-        for n, o in enumerate(del_taller):
-            for k, u in o["POR_DIA"].items():
-                por_dia.setdefault(k, []).append((n, o, u))
-        for k, lista in por_dia.items():
-            n, o, _ = lista[-1]
-            tarde = any(x[1]["FECHA FIN OC"] and calendario[k] > x[1]["FECHA FIN OC"] for x in lista)
-            c = ws.cell(row=fila_oc, column=2 + k, value=" / ".join(str(x[1]["OC"]) for x in lista))
-            # Se alterna tono claro/oscuro entre OC consecutivas para distinguirlas
-            c.fill = PatternFill("solid", fgColor=COLOR_ATRASO if tarde else (base if n % 2 == 0 else "404040"))
-            c.font = Font(color="FFFFFF", size=8, bold=True)
-            c.alignment = Alignment(horizontal="center", vertical="center", text_rotation=90, wrap_text=True)
-            u = ws.cell(row=fila_u, column=2 + k, value=sum(x[2] for x in lista))
-            u.font = Font(size=7)
-            u.alignment = Alignment(horizontal="center", text_rotation=90)
-        ws.row_dimensions[fila_oc].height = 70
-        for col in range(1, 2 + len(calendario)):
-            ws.cell(row=fila_oc, column=col).border = borde
-    ws.column_dimensions["A"].width = 12
-    for k in range(len(calendario)):
-        ws.column_dimensions[get_column_letter(2 + k)].width = 4.2
-    ws.freeze_panes = "B2"
-    nota = 3 + len(talleres) * 3
-    ws.cell(row=nota, column=1, value="Cada celda muestra la OC del día (dos OC si una termina y otra empieza ese día). "
-                                      "Tonos alternados = OC distintas; ROJO = después de la FECHA FIN de la OC.")
-
-
-def guardar(ocs, calendario, feriados, origen_feriados, fecha_inicio, advertencias, archivo_salida):
-    talleres = list(dict.fromkeys(o["TALLER"] for o in ocs))
+def guardar(ocs, calendario, feriados, origen_feriados, talleres, origen_talleres, fecha_inicio,
+            advertencias, archivo_salida):
+    talleres_orden = list(dict.fromkeys(o["TALLER"] for o in ocs))
     wb = Workbook()
-    hoja_gantt(wb, ocs, calendario, feriados, talleres)
-    hoja_gantt_compacto(wb, ocs, calendario, talleres)
+    hoja_gantt_lineas(wb, ocs, calendario, talleres_orden, talleres)
+    hoja_gantt_oc(wb, ocs, calendario, talleres_orden, talleres)
 
-    fmt_f = "dd/mm/yyyy"
     ws = wb.create_sheet("PROGRAMA_OC")
-    columnas = ["SECUENCIA", "TALLER", "OC", "CLIENTE", "DESCRIPCION", "FAMILIA", "MODELO", "COLOR", "ESTADO OC",
-                "TALLES", "CANTIDAD PLANIFICADA", "CAPACIDAD/DÍA", "DÍAS HÁBILES", "INICIO PROGRAMADO",
-                "FIN PROGRAMADO", "FECHA FIN OC", "ESTADO", "DÍAS HÁBILES DE ATRASO"]
+    columnas = ["SECUENCIA", "TALLER", "OC", "LÍNEAS", "CLIENTE", "DESCRIPCION", "FAMILIA", "MODELO", "COLOR",
+                "ESTADO OC", "TALLES", "CANTIDAD PLANIFICADA", "CAP/DÍA LÍNEA", "DÍAS HÁBILES",
+                "INICIO PROGRAMADO", "FIN PROGRAMADO", "FECHA FIN OC", "ESTADO", "DÍAS HÁBILES DE ATRASO"]
     filas = []
-    for t in talleres:
+    for t in talleres_orden:
         for i, o in enumerate([o for o in ocs if o["TALLER"] == t], 1):
-            filas.append([i, t, o["OC"], o["CLIENTE"], o["DESCRIPCION"], o["FAMILIA"], o["MODELO"], o["COLOR"],
-                          o["ESTADO OC"], o["TALLES"], o["CANTIDAD"], round(o["CAP_DIA"], 1), round(o["DIAS"], 2),
-                          o["INICIO PROG"], o["FIN PROG"], o["FECHA FIN OC"], o["ESTADO"], o["ATRASO"]])
+            filas.append([i, t, o["OC"], o["LINEAS"], o["CLIENTE"], o["DESCRIPCION"], o["FAMILIA"], o["MODELO"],
+                          o["COLOR"], o["ESTADO OC"], o["TALLES"], o["CANTIDAD"], round(o["CAP_DIA"], 1),
+                          round(o["DIAS"], 2), o["INICIO PROG"], o["FIN PROG"], o["FECHA FIN OC"], o["ESTADO"],
+                          o["ATRASO"]])
     tabla(ws, columnas, filas,
           anchos={"CLIENTE": 30, "DESCRIPCION": 30, "MODELO": 24, "INICIO PROGRAMADO": 13, "FIN PROGRAMADO": 13},
-          formatos={"INICIO PROGRAMADO": fmt_f, "FIN PROGRAMADO": fmt_f, "FECHA FIN OC": fmt_f})
-    rojo = PatternFill("solid", fgColor="FFC7CE")
+          formatos={"INICIO PROGRAMADO": FMT_FECHA, "FIN PROGRAMADO": FMT_FECHA, "FECHA FIN OC": FMT_FECHA})
+    col_estado = columnas.index("ESTADO") + 1
     for r in range(2, len(filas) + 2):
-        if ws.cell(row=r, column=17).value == "ATRASADA":
-            ws.cell(row=r, column=17).fill = rojo
+        if ws.cell(row=r, column=col_estado).value == "ATRASADA":
+            ws.cell(row=r, column=col_estado).fill = PatternFill("solid", fgColor="FFC7CE")
 
     ws = wb.create_sheet("DETALLE_DIARIO")
     filas = []
     for o in ocs:
-        for k in sorted(o["POR_DIA"]):
-            filas.append([calendario[k], o["TALLER"], o["OC"], o["MODELO"], o["COLOR"], o["POR_DIA"][k]])
-    filas.sort(key=lambda f: (talleres.index(f[1]), f[0]))
-    tabla(ws, ["FECHA", "TALLER", "OC", "MODELO", "COLOR", "UNIDADES"], filas,
-          anchos={"FECHA": 12, "MODELO": 24}, formatos={"FECHA": fmt_f})
+        for t in o["TRAMOS"]:
+            for k in sorted(t["POR_DIA"]):
+                filas.append([calendario[k], o["TALLER"], nombre_linea(t["LINEA"]), o["OC"], o["MODELO"],
+                              o["COLOR"], t["POR_DIA"][k]])
+    filas.sort(key=lambda f: (talleres_orden.index(f[1]), f[0], f[2]))
+    tabla(ws, ["FECHA", "TALLER", "LÍNEA", "OC", "MODELO", "COLOR", "UNIDADES"], filas,
+          anchos={"FECHA": 12, "MODELO": 24}, formatos={"FECHA": FMT_FECHA})
+
+    ws = wb.create_sheet("CARGA_LINEAS")
+    filas = []
+    for t in talleres_orden:
+        del_t = [o for o in ocs if o["TALLER"] == t]
+        n_lineas, max_oc = talleres.get(t, (1, 1))
+        for i in range(n_lineas):
+            tramos = [(o, tr) for o in del_t for tr in o["TRAMOS"] if tr["LINEA"] == i]
+            if not tramos:
+                filas.append([t, nombre_linea(i), 0, 0, 0, None, None])
+                continue
+            dias = sorted({k for _, tr in tramos for k in tr["POR_DIA"]})
+            filas.append([t, nombre_linea(i), len(tramos), sum(tr["UNIDADES"] for _, tr in tramos),
+                          round(sum(tr["FIN"] - tr["INICIO"] for _, tr in tramos), 2),
+                          calendario[dias[0]], calendario[dias[-1]]])
+    tabla(ws, ["TALLER", "LÍNEA", "N° OC", "UNIDADES", "DÍAS HÁBILES", "INICIO", "FIN"], filas,
+          formatos={"INICIO": FMT_FECHA, "FIN": FMT_FECHA})
 
     ws = wb.create_sheet("RESUMEN_TALLER")
     filas = []
-    for t in talleres:
+    for t in talleres_orden:
         del_t = [o for o in ocs if o["TALLER"] == t]
-        filas.append([t, len(del_t), sum(o["CANTIDAD"] for o in del_t),
-                      ", ".join(sorted({f"{o['CAP_DIA']:.1f}" for o in del_t})),
-                      round(sum(o["DIAS"] for o in del_t), 2),
+        n_lineas, max_oc = talleres.get(t, (1, 1))
+        caps = sorted({round(o["CAP_DIA"], 1) for o in del_t})
+        filas.append([t, n_lineas, max_oc, ", ".join(f"{c:g}" for c in caps),
+                      ", ".join(f"{c * n_lineas:g}" for c in caps), len(del_t), sum(o["CANTIDAD"] for o in del_t),
                       min(o["INICIO PROG"] for o in del_t), max(o["FIN PROG"] for o in del_t),
                       sum(1 for o in del_t if o["ESTADO"] == "ATRASADA")])
-    tabla(ws, ["TALLER", "N° OC", "UNIDADES", "CAPACIDAD/DÍA", "DÍAS HÁBILES", "INICIO", "FIN", "OC ATRASADAS"],
-          filas, formatos={"INICIO": fmt_f, "FIN": fmt_f})
+    tabla(ws, ["TALLER", "LÍNEAS", "MÁX. LÍNEAS POR OC", "CAP/DÍA LÍNEA", "CAP/DÍA TALLER", "N° OC", "UNIDADES",
+               "INICIO", "FIN", "OC ATRASADAS"], filas, formatos={"INICIO": FMT_FECHA, "FIN": FMT_FECHA})
     r = len(filas) + 3
     notas = [
         f"Fecha de inicio: {fecha_inicio:%d/%m/%Y}.",
-        f"Capacidad diaria = OPERADORES x {MINUTOS_POR_DIA} min / TIEMPO (hoja CAPACIDAD).",
-        "Orden dentro de cada taller: el mismo de la hoja LISTA OC; las OC se suman sin abrir por talle.",
-        "Si una OC termina a mitad de día, la siguiente OC del taller empieza ese mismo día.",
+        f"Capacidad de una línea = OPERADORES x {MINUTOS_POR_DIA} min / TIEMPO (hoja CAPACIDAD).",
+        f"Líneas por taller: {origen_talleres}.",
+        "Orden: el de la hoja LISTA OC; las OC se suman sin abrir por talle.",
+        "Cada OC va a las líneas que se liberan primero (hasta el máximo por OC), repartida para que terminen a la vez.",
+        "Una OC de menos de un día de una línea no se divide en dos líneas.",
         f"Feriados: {origen_feriados}.",
     ]
     for i, n in enumerate(notas):
@@ -433,7 +518,7 @@ def guardar(ocs, calendario, feriados, origen_feriados, fecha_inicio, advertenci
     ws = wb.create_sheet("FERIADOS")
     hasta = calendario[-1] if calendario else fecha_inicio
     filas = [[f, d] for f, d in sorted(feriados.items()) if fecha_inicio <= f <= hasta + timedelta(days=31)]
-    tabla(ws, ["FECHA", "DESCRIPCION"], filas, anchos={"FECHA": 12, "DESCRIPCION": 60}, formatos={"FECHA": fmt_f})
+    tabla(ws, ["FECHA", "DESCRIPCION"], filas, anchos={"FECHA": 12, "DESCRIPCION": 60}, formatos={"FECHA": FMT_FECHA})
 
     if advertencias:
         ws = wb.create_sheet("ADVERTENCIAS")
@@ -449,18 +534,23 @@ def main():
 
     advertencias = []
     cap = leer_capacidad(archivo)
-    feriados, origen = leer_feriados(archivo)
+    feriados, origen_feriados = leer_feriados(archivo)
+    talleres, origen_talleres = leer_talleres(archivo)
     ocs = leer_ocs(archivo, cap, advertencias)
     if not ocs:
         print("No hay OC para programar.")
         return
-    calendario = programar(ocs, fecha_inicio, feriados)
-    guardar(ocs, calendario, feriados, origen, fecha_inicio, advertencias, ARCHIVO_SALIDA)
+    for t in dict.fromkeys(o["TALLER"] for o in ocs):
+        if t not in talleres:
+            advertencias.append(f"Taller {t}: no está en la tabla de talleres; se programa con 1 línea.")
+    calendario = programar(ocs, fecha_inicio, feriados, talleres)
+    guardar(ocs, calendario, feriados, origen_feriados, talleres, origen_talleres, fecha_inicio,
+            advertencias, ARCHIVO_SALIDA)
 
     print(f"Programa generado: {ARCHIVO_SALIDA}")
     for t in dict.fromkeys(o["TALLER"] for o in ocs):
         del_t = [o for o in ocs if o["TALLER"] == t]
-        print(f"  {t}: {len(del_t)} OC, {sum(o['CANTIDAD'] for o in del_t)} u, "
+        print(f"  {t} ({talleres.get(t, (1, 1))[0]} línea/s): {len(del_t)} OC, {sum(o['CANTIDAD'] for o in del_t)} u, "
               f"{min(o['INICIO PROG'] for o in del_t):%d/%m/%Y} -> {max(o['FIN PROG'] for o in del_t):%d/%m/%Y}, "
               f"{sum(1 for o in del_t if o['ESTADO'] == 'ATRASADA')} atrasadas")
     for a in advertencias:

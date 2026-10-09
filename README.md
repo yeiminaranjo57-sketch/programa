@@ -168,15 +168,20 @@ Camino recomendado:
 
 ---
 
-## 11. Gantt de OC por taller (`gantt_oc.py`)
+## 11. Gantt de OC por taller y línea (`gantt_oc.py`)
 
 Programa las OC de la hoja **LISTA OC** (sumando todos los talles de cada OC) en su taller,
 usando la hoja **CAPACIDAD** del mismo archivo.
 
 - **Entrada:** `entradas/PRUEBA_GANTT.xlsx` (hojas `LISTA OC` y `CAPACIDAD`).
-- **Capacidad diaria** = OPERADORES × 495 min ÷ TIEMPO, buscada por MODELO + COLOR.
-- **Orden:** el de la hoja LISTA OC; una OC detrás de otra en cada taller. Si una OC
-  termina a mitad de día, la siguiente empieza ese mismo día.
+- **Capacidad de UNA línea** = OPERADORES × 495 min ÷ TIEMPO, buscada por MODELO + COLOR.
+- **Líneas por taller:** CASEROS tiene 7 líneas y cada OC puede ir como máximo en 2;
+  OLIDEN tiene 1 línea. Para cambiarlo, agregue al archivo de entrada una hoja `TALLERES`
+  con las columnas `TALLER`, `LINEAS` y `MAX_LINEAS_POR_OC`.
+- **Orden:** el de la hoja LISTA OC. Cada OC va a las líneas que se liberan primero
+  (hasta el máximo), con la cantidad repartida para que terminen a la vez. Una OC de menos
+  de un día de una línea no se divide. Si una OC termina a mitad de día, la siguiente
+  empieza ese mismo día en esa línea.
 - **Calendario:** desde el 09/10/2026, solo días hábiles: sin sábados, domingos ni
   feriados nacionales de Argentina. Para usar otros feriados, agregue al archivo de
   entrada una hoja `FERIADOS` con la columna `FECHA` (y opcional `DESCRIPCION`).
@@ -185,9 +190,10 @@ usando la hoja **CAPACIDAD** del mismo archivo.
 
 | Hoja | Para qué sirve |
 |---|---|
-| **GANTT_TALLER** | Gantt agrupado por taller: una fila por OC, una columna por día hábil, unidades por día. Rojo = después de la FECHA FIN |
-| **GANTT_COMPACTO** | Una fila por taller con la OC que se trabaja cada día |
-| **PROGRAMA_OC** | Inicio y fin programados de cada OC, estado y días de atraso |
-| **DETALLE_DIARIO** | Fecha / taller / OC / unidades (para tablas dinámicas) |
-| **RESUMEN_TALLER** | Unidades, días de carga y fecha de fin por taller |
+| **GANTT_LINEAS** | Gantt por taller: una fila por línea con la OC de cada día y sus unidades. Rojo = después de la FECHA FIN |
+| **GANTT_OC** | Gantt por taller con una fila por OC, sus líneas y las unidades de cada día |
+| **PROGRAMA_OC** | Líneas, inicio y fin programados de cada OC, estado y días de atraso |
+| **DETALLE_DIARIO** | Fecha / taller / línea / OC / unidades (para tablas dinámicas) |
+| **CARGA_LINEAS** | Unidades, días de carga y fecha de fin de cada línea |
+| **RESUMEN_TALLER** | Líneas, capacidad del taller, unidades y fecha de fin por taller |
 | **FERIADOS** | Feriados que se descontaron |
